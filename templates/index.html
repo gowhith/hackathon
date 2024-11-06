@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>FOOD SECURITY CHATBOT</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Roboto', sans-serif;
+            background-color: #2c3e50;
+            color: #ecf0f1;
+        }
+        #chat-container {
+            width: 90%;
+            max-width: 800px;
+            height: 700px; /* Increased height for more space */
+            margin: 40px auto;
+            border: 1px solid #7f8c8d;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.1);
+            background-color: #34495e;
+            display: flex;
+            flex-direction: column;
+        }
+        #chat-window {
+            flex-grow: 1; /* Takes remaining height inside chat container */
+            overflow-y: auto;
+            border: 1px solid #7f8c8d;
+            padding: 20px;
+            background-color: #1c2833;
+            border-radius: 8px;
+            font-size: 16px;
+            margin-bottom: 20px;
+        }
+        .chat-message {
+            padding: 10px 15px;
+            margin: 10px 0;
+            border-radius: 15px;
+            max-width: 75%;
+            word-wrap: break-word;
+        }
+        .user-message {
+            background-color: #3498db;
+            color: white;
+            text-align: right;
+            margin-left: auto;
+        }
+        .bot-message {
+            background-color: #95a5a6;
+            color: #2c3e50;
+            text-align: left;
+            margin-right: auto;
+        }
+        #questionForm {
+            display: flex;
+            align-items: center;
+        }
+        #question {
+            background-color: #34495e;
+            color: white;
+            border: 1px solid #7f8c8d;
+            border-radius: 5px;
+            resize: none;
+            font-size: 16px;
+            width: 85%;
+            margin-right: 10px;
+        }
+        .btn-primary {
+            background-color: #2980b9;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+    <h2 style="text-align: center; margin-top: 40px; color: #ecf0f1;">FOOD SECURITY CHATBOT</h2>
+    <div id="chat-container">
+        <div id="chat-window"></div>
+        <form id="questionForm">
+            <textarea id="question" class="form-control" rows="2" placeholder="Type your macroeconomics question..."></textarea>
+            <button type="submit" class="btn btn-primary">Ask</button>
+        </form>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.3.1.slim.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js"></script>
+    <script>
+        document.getElementById('questionForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const question = document.getElementById('question').value;
+            const chatWindow = document.getElementById('chat-window');
+
+            const userMessage = document.createElement('div');
+            userMessage.classList.add('chat-message', 'user-message');
+            userMessage.textContent = question;
+            chatWindow.appendChild(userMessage);
+
+            fetch('/ask', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: 'question=' + encodeURIComponent(question)
+            })
+            .then(response => response.json())
+            .then(data => {
+                const botMessage = document.createElement('div');
+                botMessage.classList.add('chat-message', 'bot-message');
+                botMessage.textContent = data.response || "I'm sorry, I couldn't understand that.";
+                chatWindow.appendChild(botMessage);
+
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+            });
+
+            document.getElementById('question').value = '';
+        });
+    </script>
+</body>
+</html>

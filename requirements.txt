@@ -1,0 +1,7 @@
+Flask
+redis
+json5
+openai
+pymupdf
+scikit-learn
+numpy
