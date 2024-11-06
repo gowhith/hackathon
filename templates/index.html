@@ -4,6 +4,7 @@
     <title>FOOD SECURITY CHATBOT</title>
     <!-- Bootstrap CSS -->
     <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500&display=swap" rel="stylesheet">
     <style>
         body {
             margin: 0;
@@ -16,7 +17,7 @@
         #chat-container {
             width: 90%;
             max-width: 800px;
-            height: 700px; /* Increased height for more space */
+            height: 700px;
             margin: 40px auto;
             border: 1px solid #7f8c8d;
             border-radius: 10px;
@@ -27,7 +28,7 @@
             flex-direction: column;
         }
         #chat-window {
-            flex-grow: 1; /* Takes remaining height inside chat container */
+            flex-grow: 1;
             overflow-y: auto;
             border: 1px solid #7f8c8d;
             padding: 20px;
@@ -42,6 +43,11 @@
             border-radius: 15px;
             max-width: 75%;
             word-wrap: break-word;
+            animation: fadeIn 0.3s ease-in;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
         }
         .user-message {
             background-color: #3498db;
@@ -68,6 +74,15 @@
             font-size: 16px;
             width: 85%;
             margin-right: 10px;
+            padding: 10px;
+        }
+        #question::placeholder {
+            color: #95a5a6;
+        }
+        #question:focus {
+            outline: none;
+            border-color: #3498db;
+            box-shadow: 0 0 5px rgba(52, 152, 219, 0.5);
         }
         .btn-primary {
             background-color: #2980b9;
@@ -75,15 +90,63 @@
             padding: 10px 20px;
             border-radius: 5px;
             font-size: 16px;
+            transition: background-color 0.3s ease;
+        }
+        .btn-primary:hover {
+            background-color: #3498db;
+        }
+        .btn-primary:disabled {
+            background-color: #95a5a6;
+            cursor: not-allowed;
+        }
+        .typing-indicator {
+            padding: 10px 15px;
+            margin: 10px 0;
+            border-radius: 15px;
+            max-width: 75%;
+            display: none;
+            background-color: #95a5a6;
+            color: #2c3e50;
+            text-align: left;
+            margin-right: auto;
+            position: relative;
+        }
+        .typing-indicator::after {
+            content: "...";
+            animation: typing 1.4s infinite;
+            position: absolute;
+            right: 10px;
+        }
+        @keyframes typing {
+            0%, 100% { content: "."; }
+            33% { content: ".."; }
+            66% { content: "..."; }
+        }
+        /* Custom Scrollbar */
+        #chat-window::-webkit-scrollbar {
+            width: 8px;
+        }
+        #chat-window::-webkit-scrollbar-track {
+            background: #1c2833;
+            border-radius: 4px;
+        }
+        #chat-window::-webkit-scrollbar-thumb {
+            background: #7f8c8d;
+            border-radius: 4px;
+        }
+        #chat-window::-webkit-scrollbar-thumb:hover {
+            background: #95a5a6;
         }
     </style>
 </head>
 <body>
-    <h2 style="text-align: center; margin-top: 40px; color: #ecf0f1;">FOOD SECURITY CHATBOT</h2>
+    <h2 style="text-align: center; margin-top: 40px; color: #ecf0f1; font-weight: 500;">FOOD SECURITY CHATBOT</h2>
     <div id="chat-container">
-        <div id="chat-window"></div>
+        <div id="chat-window">
+            <div id="typing-indicator" class="typing-indicator">Assistant is thinking</div>
+        </div>
         <form id="questionForm">
-            <textarea id="question" class="form-control" rows="2" placeholder="Type your macroeconomics question..."></textarea>
+            <textarea id="question" class="form-control" rows="2" placeholder="Type your question here..."></textarea>
             <button type="submit" class="btn btn-primary">Ask</button>
         </form>
     </div>
@@ -92,34 +155,93 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js"></script>
     <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js"></script>
     <script>
-        document.getElementById('questionForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            const question = document.getElementById('question').value;
-            const chatWindow = document.getElementById('chat-window');
+        // Handle Enter key in textarea
+        document.getElementById('question').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                document.getElementById('questionForm').dispatchEvent(new Event('submit'));
+            }
+        });
 
+        document.getElementById('questionForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const question = document.getElementById('question');
+            const chatWindow = document.getElementById('chat-window');
+            const submitButton = this.querySelector('button[type="submit"]');
+            const typingIndicator = document.getElementById('typing-indicator');
+            
+            if (!question.value.trim()) return;
+
+            // Disable input while processing
+            question.disabled = true;
+            submitButton.disabled = true;
+
+            // Display user message
             const userMessage = document.createElement('div');
             userMessage.classList.add('chat-message', 'user-message');
-            userMessage.textContent = question;
+            userMessage.textContent = question.value;
             chatWindow.appendChild(userMessage);
 
-            fetch('/ask', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: 'question=' + encodeURIComponent(question)
-            })
-            .then(response => response.json())
-            .then(data => {
+            // Show typing indicator
+            typingIndicator.style.display = 'block';
+            chatWindow.scrollTop = chatWindow.scrollHeight;
+
+            try {
+                // Send to RabbitMQ queue through server endpoint
+                const response = await fetch('/ask', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: 'question=' + encodeURIComponent(question.value)
+                });
+
+                if (!response.ok) {
+                    throw new Error('Network response was not ok');
+                }
+
+                const data = await response.json();
+
+                // Hide typing indicator
+                typingIndicator.style.display = 'none';
+
+                // Create and append bot message
                 const botMessage = document.createElement('div');
                 botMessage.classList.add('chat-message', 'bot-message');
                 botMessage.textContent = data.response || "I'm sorry, I couldn't understand that.";
                 chatWindow.appendChild(botMessage);
+            } catch (error) {
+                console.error('Error:', error);
+                
+                // Hide typing indicator
+                typingIndicator.style.display = 'none';
 
+                // Show error message
+                const errorMessage = document.createElement('div');
+                errorMessage.classList.add('chat-message', 'bot-message');
+                errorMessage.textContent = "Sorry, there was an error processing your request. Please try again.";
+                chatWindow.appendChild(errorMessage);
+            } finally {
+                // Re-enable input
+                question.disabled = false;
+                submitButton.disabled = false;
+                
+                // Clear input
+                question.value = '';
+                
+                // Scroll to bottom
                 chatWindow.scrollTop = chatWindow.scrollHeight;
-            });
+            }
+        });
 
-            document.getElementById('question').value = '';
+        // Add welcome message when page loads
+        window.addEventListener('load', function() {
+            const chatWindow = document.getElementById('chat-window');
+            const welcomeMessage = document.createElement('div');
+            welcomeMessage.classList.add('chat-message', 'bot-message');
+            welcomeMessage.textContent = "Welcome to the Food Security Chatbot! How can I assist you today?";
+            chatWindow.appendChild(welcomeMessage);
         });
     </script>
 </body>
