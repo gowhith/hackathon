@@ -11,43 +11,206 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import logging
+import pika
+import threading
+import uuid
+from time import sleep
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Set up basic logging
 logging.basicConfig(level=logging.INFO)
-
 # Disable SSL verification (only use this in development)
 ssl._create_default_https_context = ssl._create_unverified_context
 
 app = Flask(__name__, static_url_path='', static_folder='.')
 
 # Initialize OpenAI client
-client = OpenAI(api_key=<palce your api key here>)
+client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
 # SQLite Database setup
 DATABASE = 'chatbot.db'
 PDF_FOLDER = 'pdfFolder'
 
 # Initialize Redis client
-redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
+REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
+REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
+redis_client = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=0)
 try:
     redis_client.ping()
     print("Redis is connected!")
 except redis.ConnectionError:
     print("Could not connect to Redis.")
 
+# RabbitMQ setup
+RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', '127.0.0.1')
+RABBITMQ_PORT = int(os.getenv('RABBITMQ_PORT', 5672))
+RABBITMQ_USER = os.getenv('RABBITMQ_USER', 'guest')
+RABBITMQ_PASS = os.getenv('RABBITMQ_PASS', 'guest')
+QUERY_QUEUE = 'query_queue'
+RESPONSE_QUEUE = 'response_queue'
+
 # Global variables for text chunks and vectorizer
 text_chunks = []
 vectorizer = None
 chunk_embeddings = None
-def clear_db():
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute('DELETE FROM chat_history')
-    conn.commit()
-    conn.close()
-    print("SQLite database cleared for testing.")
 
-clear_db()
+def delete_queues():
+    """Delete existing queues if they exist"""
+    try:
+        parameters = pika.ConnectionParameters(
+            host=RABBITMQ_HOST,
+            port=RABBITMQ_PORT,
+            connection_attempts=3,
+            retry_delay=1
+        )
+        connection = pika.BlockingConnection(parameters)
+        channel = connection.channel()
+        
+        # Delete existing queues
+        channel.queue_delete(queue=QUERY_QUEUE)
+        channel.queue_delete(queue=RESPONSE_QUEUE)
+        
+        connection.close()
+        logging.info("Successfully deleted existing queues")
+    except Exception as e:
+        logging.warning(f"Error deleting queues (this is normal if queues don't exist): {e}")
+
+def setup_rabbitmq():
+    """Setup RabbitMQ connection with retry logic"""
+    max_retries = 3
+    retry_delay = 2  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            # Create connection parameters explicitly using IPv4
+            parameters = pika.ConnectionParameters(
+                host=RABBITMQ_HOST,
+                port=RABBITMQ_PORT,
+                connection_attempts=3,
+                retry_delay=1,
+                socket_timeout=5
+            )
+            
+            connection = pika.BlockingConnection(parameters)
+            channel = connection.channel()
+            
+            # Declare queues (non-durable for development)
+            channel.queue_declare(queue=QUERY_QUEUE)
+            channel.queue_declare(queue=RESPONSE_QUEUE)
+            
+            logging.info("Successfully connected to RabbitMQ")
+            return connection, channel
+            
+        except pika.exceptions.AMQPConnectionError as e:
+            if attempt == max_retries - 1:
+                logging.error(f"Failed to connect to RabbitMQ after {max_retries} attempts: {e}")
+                raise
+            logging.warning(f"RabbitMQ connection attempt {attempt + 1} failed. Retrying in {retry_delay} seconds...")
+            sleep(retry_delay)
+
+def get_rabbitmq_channel():
+    """Get a new channel with error handling"""
+    try:
+        connection, channel = setup_rabbitmq()
+        return connection, channel
+    except Exception as e:
+        logging.error(f"Failed to get RabbitMQ channel: {e}")
+        raise
+
+def publish_response(channel, correlation_id, response):
+    """Publish response to RabbitMQ response queue with error handling"""
+    try:
+        channel.basic_publish(
+            exchange='',
+            routing_key=RESPONSE_QUEUE,
+            properties=pika.BasicProperties(
+                correlation_id=correlation_id
+            ),
+            body=json.dumps({'response': response})
+        )
+        logging.info(f"Published response for correlation_id: {correlation_id}")
+    except Exception as e:
+        logging.error(f"Error publishing response: {e}")
+        raise
+
+def process_query(ch, method, properties, body):
+    """Process incoming queries from RabbitMQ"""
+    try:
+        query_data = json.loads(body)
+        question = query_data['question']
+        correlation_id = properties.correlation_id
+        
+        logging.info(f"Processing query with correlation_id: {correlation_id}")
+        
+        # Check Redis cache first
+        response = get_cached_response(question)
+        if response is not None:
+            logging.info("Response retrieved from Redis cache.")
+        else:
+            # Check SQLite database
+            response = get_response_from_db(question)
+            if response:
+                logging.info("Response retrieved from SQLite database.")
+            else:
+                # If not in Redis or SQLite, call OpenAI API
+                response = ask_file(question)
+                if response and response != "No relevant information found in the PDFs.":
+                    store_query_response(question, response)
+                    cache_response(question, response)
+                    logging.info("Response generated by OpenAI API and stored in Redis cache.")
+        
+        # Publish response back to RabbitMQ
+        publish_response(ch, correlation_id, response)
+        
+        # Acknowledge the message
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+        
+    except Exception as e:
+        logging.error(f"Error processing query: {e}")
+        # Negative acknowledge the message to requeue it
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+
+def start_consuming():
+    """Start consuming messages from RabbitMQ in a separate thread with reconnection logic"""
+    while True:
+        try:
+            connection, channel = setup_rabbitmq()
+            channel.basic_qos(prefetch_count=1)
+            channel.basic_consume(queue=QUERY_QUEUE, on_message_callback=process_query)
+            
+            logging.info("Starting to consume messages from RabbitMQ")
+            channel.start_consuming()
+            
+        except pika.exceptions.ConnectionClosedByBroker:
+            logging.warning("Connection was closed by broker, retrying...")
+            continue
+            
+        except pika.exceptions.AMQPChannelError as e:
+            logging.error(f"Channel error: {e}, stopping...")
+            break
+            
+        except pika.exceptions.AMQPConnectionError:
+            logging.warning("Connection was lost, retrying...")
+            continue
+            
+        except Exception as e:
+            logging.error(f"Unexpected error in consumer thread: {e}")
+            if 'connection' in locals() and connection and not connection.is_closed:
+                connection.close()
+            sleep(5)
+            continue
+
+# Delete existing queues before starting
+delete_queues()
+
+# Start consumer thread
+consumer_thread = threading.Thread(target=start_consuming)
+consumer_thread.daemon = True
+consumer_thread.start()
+
 def init_db():
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
@@ -81,7 +244,7 @@ def cache_response(query, response, ttl=3600):
 
 def preprocess(text):
     text = text.replace('\n', ' ')
-    text = re.sub(r'\s+', ' ', text)
+    text = re.sub('\s+', ' ', text)
     return text
 
 def pdf_to_text(path):
@@ -203,30 +366,57 @@ def index():
     init_db()
     return render_template('index.html')
 
-
 @app.route('/ask', methods=['POST'])
 def ask():
-    question = request.form.get('question')
-    
-    # Check Redis cache first
-    response = get_cached_response(question)
-    if response is not None:
-        logging.info("Response retrieved from Redis cache.")
-        return jsonify({'response': response})
+    try:
+        question = request.form.get('question')
+        correlation_id = str(uuid.uuid4())
+        
+        # Setup RabbitMQ connection for publishing
+        connection, channel = get_rabbitmq_channel()
+        
+        # Publish question to query queue
+        channel.basic_publish(
+            exchange='',
+            routing_key=QUERY_QUEUE,
+            properties=pika.BasicProperties(
+                correlation_id=correlation_id,
+                reply_to=RESPONSE_QUEUE
+            ),
+            body=json.dumps({'question': question})
+        )
+        
+        # Setup consumer for this specific response
+        response = None
+        def callback(ch, method, properties, body):
+            if properties.correlation_id == correlation_id:
+                nonlocal response
+                response = json.loads(body)
+                channel.stop_consuming()
+        
+        # Start consuming from response queue
+        channel.basic_consume(
+            queue=RESPONSE_QUEUE,
+            on_message_callback=callback,
+            auto_ack=True
+        )
+        
+        # Wait for response with timeout
+        try:
+            channel.start_consuming()
+        except Exception as e:
+            logging.error(f"Error while consuming response: {e}")
+            response = {'error': 'Failed to get response, please try again'}
+        
+        # Close connection
+        connection.close()
+        
+        return jsonify(response or {'error': 'No response received'})
+        
+    except Exception as e:
+        logging.error(f"Error in ask endpoint: {e}")
+        return jsonify({'error': 'An error occurred, please try again'})
 
-    # Check SQLite database
-    response = get_response_from_db(question)
-    if response:
-        logging.info("Response retrieved from SQLite database.")
-    else:
-        # If not in Redis or SQLite, call OpenAI API
-        response = ask_file(question)
-        if response and response != "No relevant information found in the PDFs.":
-            store_query_response(question, response)
-            cache_response(question, response)
-            logging.info("Response generated by OpenAI API and stored in Redis cache.")
-
-    return jsonify({'response': response})
 if __name__ == '__main__':
     init_db()
     initialize_vectorizer()
